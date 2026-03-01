@@ -1,0 +1,17 @@
+# Local cache
+.hn_cli_cache.json
+
+# Build artifacts
+hn-cli
+*.o
+*.out
+
+# Test and coverage artifacts
+*.gcda
+*.gcno
+*.gcov
+coverage/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
