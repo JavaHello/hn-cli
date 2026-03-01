@@ -66,8 +66,41 @@ void hn_item_free(HNItem *item) {
     memset(item, 0, sizeof(*item));
 }
 
-int hn_fetch_top_ids(size_t limit, long **ids, size_t *count, char **error_msg) {
-    char *payload = fetch_url_or_mock(HN_BASE "/topstories.json", "topstories.json", error_msg);
+static int resolve_story_endpoint(const char *type, const char **endpoint, const char **mock_name) {
+    if (type == NULL || strcmp(type, "top") == 0) {
+        *endpoint = "topstories.json";
+        *mock_name = "topstories.json";
+        return 0;
+    }
+    if (strcmp(type, "past") == 0) {
+        *endpoint = "paststories.json";
+        *mock_name = "paststories.json";
+        return 0;
+    }
+    if (strcmp(type, "ask") == 0) {
+        *endpoint = "askstories.json";
+        *mock_name = "askstories.json";
+        return 0;
+    }
+    if (strcmp(type, "show") == 0) {
+        *endpoint = "showstories.json";
+        *mock_name = "showstories.json";
+        return 0;
+    }
+    return -1;
+}
+
+int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count, char **error_msg) {
+    const char *endpoint = NULL;
+    const char *mock_name = NULL;
+    if (resolve_story_endpoint(type, &endpoint, &mock_name) != 0) {
+        *error_msg = strdup("invalid story type");
+        return -1;
+    }
+
+    char url[256];
+    snprintf(url, sizeof(url), HN_BASE "/%s", endpoint);
+    char *payload = fetch_url_or_mock(url, mock_name, error_msg);
     if (payload == NULL) {
         return -1;
     }
@@ -99,6 +132,10 @@ int hn_fetch_top_ids(size_t limit, long **ids, size_t *count, char **error_msg) 
     *ids = out;
     *count = n;
     return 0;
+}
+
+int hn_fetch_top_ids(size_t limit, long **ids, size_t *count, char **error_msg) {
+    return hn_fetch_story_ids("top", limit, ids, count, error_msg);
 }
 
 int hn_fetch_item(long id, HNItem *item, char **error_msg) {

@@ -159,11 +159,11 @@ static int print_list_with_ids(const long *ids, size_t count) {
     return 0;
 }
 
-int cli_run_list(size_t limit) {
+int cli_run_list(const char *type, size_t limit) {
     long *ids = NULL;
     size_t count = 0;
     char *err = NULL;
-    if (hn_fetch_top_ids(limit, &ids, &count, &err) != 0) {
+    if (hn_fetch_story_ids(type, limit, &ids, &count, &err) != 0) {
         fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
         free(err);
         return 1;

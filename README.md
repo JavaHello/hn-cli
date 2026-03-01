@@ -29,6 +29,10 @@ make
 # 列表模式
 ./hn-cli list
 ./hn-cli list -n 20
+./hn-cli list -t top -n 20
+./hn-cli list --type past -n 20
+./hn-cli list --type ask -n 20
+./hn-cli list --type show -n 20
 
 # 打开帖子（id 或 index）
 ./hn-cli open 12345678

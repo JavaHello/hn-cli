@@ -16,6 +16,7 @@ typedef struct {
 } HNItem;
 
 int hn_fetch_top_ids(size_t limit, long **ids, size_t *count, char **error_msg);
+int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count, char **error_msg);
 int hn_fetch_item(long id, HNItem *item, char **error_msg);
 void hn_item_free(HNItem *item);
 

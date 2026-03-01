@@ -20,6 +20,18 @@ out_list_cached="$(env -u DEEPSEEK_API_KEY HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixt
 grep -q "总结: 这是一个简洁的命令行工具分享。" <<<"$out_list_cached" || { echo "FAIL: cache summary not used"; echo "$out_list_cached"; rm -f "$tmp_cache"; exit 1; }
 rm -f "$tmp_cache"
 
+out_list_past="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list -t past -n 1)"
+grep -q "\[1\] \[88\] Ask HN: What did you build years ago? (id:3001)" <<<"$out_list_past" || { echo "FAIL: list -t past output mismatch"; echo "$out_list_past"; exit 1; }
+
+out_list_ask="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list --type ask -n 1)"
+grep -q "\[1\] \[123\] Ask HN: Best terminal workflow? (id:4001)" <<<"$out_list_ask" || { echo "FAIL: list --type ask output mismatch"; echo "$out_list_ask"; exit 1; }
+
+out_list_show="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list --type show -n 1)"
+grep -q "\[1\] \[256\] Show HN: Retro Desktop App (id:5001)" <<<"$out_list_show" || { echo "FAIL: list --type show output mismatch"; echo "$out_list_show"; exit 1; }
+
+out_bad_type="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" ./hn-cli list -t unknown -n 1 2>&1 || true)"
+grep -q "error: invalid type 'unknown'" <<<"$out_bad_type" || { echo "FAIL: invalid type error missing"; echo "$out_bad_type"; exit 1; }
+
 out_open="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" ./hn-cli open 1001)"
 grep -q "中文总结与翻译:" <<<"$out_open" || { echo "FAIL: open missing chinese header"; echo "$out_open"; exit 1; }
 grep -q "中文摘要: 这是一个 Tiny CLI 项目。" <<<"$out_open" || { echo "FAIL: open missing chinese summary"; echo "$out_open"; exit 1; }

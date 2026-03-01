@@ -5,7 +5,7 @@
 #include <string.h>
 
 static void print_usage(void) {
-    printf("Usage: hn-cli [list [-n N] | open <id> | --help]\n");
+    printf("Usage: hn-cli [list [-t TYPE|--type TYPE] [-n N] | open <id> | --help]\n");
 }
 
 int main(int argc, char **argv) {
@@ -20,13 +20,36 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "list") == 0) {
         size_t n = 30;
-        if (argc == 4 && strcmp(argv[2], "-n") == 0) {
-            long v = strtol(argv[3], NULL, 10);
-            if (v > 0) {
-                n = (size_t)v;
+        const char *type = "top";
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "-n") == 0) {
+                if (i + 1 >= argc) {
+                    print_usage();
+                    return 1;
+                }
+                long v = strtol(argv[++i], NULL, 10);
+                if (v > 0) {
+                    n = (size_t)v;
+                }
+                continue;
             }
+            if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--type") == 0) {
+                if (i + 1 >= argc) {
+                    print_usage();
+                    return 1;
+                }
+                type = argv[++i];
+                continue;
+            }
+            print_usage();
+            return 1;
         }
-        return cli_run_list(n);
+        if (strcmp(type, "top") != 0 && strcmp(type, "past") != 0 && strcmp(type, "ask") != 0 &&
+            strcmp(type, "show") != 0) {
+            fprintf(stderr, "error: invalid type '%s'\n", type);
+            return 1;
+        }
+        return cli_run_list(type, n);
     }
 
     if (strcmp(argv[1], "open") == 0) {
