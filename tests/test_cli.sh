@@ -20,8 +20,13 @@ out_list_cached="$(env -u DEEPSEEK_API_KEY HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixt
 grep -q "总结: 这是一个简洁的命令行工具分享。" <<<"$out_list_cached" || { echo "FAIL: cache summary not used"; echo "$out_list_cached"; rm -f "$tmp_cache"; exit 1; }
 rm -f "$tmp_cache"
 
-out_list_past="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list -t past -n 1)"
+tmp_past_mock="$(mktemp -d)"
+cp "$ROOT_DIR/tests/fixtures/topstories.json" "$tmp_past_mock/topstories.json"
+cp "$ROOT_DIR/tests/fixtures/item_3001.json" "$tmp_past_mock/item_3001.json"
+cp "$ROOT_DIR/tests/fixtures/algolia_paststories.json" "$tmp_past_mock/algolia_paststories.json"
+out_list_past="$(HN_CLI_MOCK_DIR="$tmp_past_mock" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list -t past -n 1)"
 grep -q "\[1\] \[88\] Ask HN: What did you build years ago? (id:3001)" <<<"$out_list_past" || { echo "FAIL: list -t past output mismatch"; echo "$out_list_past"; exit 1; }
+rm -rf "$tmp_past_mock"
 
 out_list_ask="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_list_response.json" ./hn-cli list --type ask -n 1)"
 grep -q "\[1\] \[123\] Ask HN: Best terminal workflow? (id:4001)" <<<"$out_list_ask" || { echo "FAIL: list --type ask output mismatch"; echo "$out_list_ask"; exit 1; }

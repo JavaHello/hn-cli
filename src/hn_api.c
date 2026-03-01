@@ -8,6 +8,7 @@
 #include <string.h>
 
 #define HN_BASE "https://hacker-news.firebaseio.com/v0"
+#define HN_ALGOLIA_PAST_URL "https://hn.algolia.com/api/v1/search_by_date?tags=story"
 
 static char *read_mock_file(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -73,8 +74,8 @@ static int resolve_story_endpoint(const char *type, const char **endpoint, const
         return 0;
     }
     if (strcmp(type, "past") == 0) {
-        *endpoint = "paststories.json";
-        *mock_name = "paststories.json";
+        *endpoint = HN_ALGOLIA_PAST_URL;
+        *mock_name = "algolia_paststories.json";
         return 0;
     }
     if (strcmp(type, "ask") == 0) {
@@ -99,20 +100,39 @@ int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count
     }
 
     char url[256];
-    snprintf(url, sizeof(url), HN_BASE "/%s", endpoint);
+    if (strcmp(type, "past") == 0) {
+        snprintf(url, sizeof(url), "%s", endpoint);
+    } else {
+        snprintf(url, sizeof(url), HN_BASE "/%s", endpoint);
+    }
     char *payload = fetch_url_or_mock(url, mock_name, error_msg);
     if (payload == NULL) {
         return -1;
     }
 
-    struct json_object *arr = json_tokener_parse(payload);
+    struct json_object *root = json_tokener_parse(payload);
     free(payload);
-    if (arr == NULL || !json_object_is_type(arr, json_type_array)) {
-        *error_msg = strdup("invalid topstories json");
-        if (arr) {
-            json_object_put(arr);
-        }
+    if (root == NULL) {
+        *error_msg = strdup("invalid story ids json");
         return -1;
+    }
+
+    struct json_object *arr = NULL;
+    if (strcmp(type, "past") == 0) {
+        if (!json_object_is_type(root, json_type_object) ||
+            !json_object_object_get_ex(root, "hits", &arr) ||
+            !json_object_is_type(arr, json_type_array)) {
+            *error_msg = strdup("invalid past stories json");
+            json_object_put(root);
+            return -1;
+        }
+    } else {
+        if (!json_object_is_type(root, json_type_array)) {
+            *error_msg = strdup("invalid story ids json");
+            json_object_put(root);
+            return -1;
+        }
+        arr = root;
     }
 
     size_t total = (size_t)json_object_array_length(arr);
@@ -126,9 +146,19 @@ int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count
 
     for (size_t i = 0; i < n; i++) {
         struct json_object *v = json_object_array_get_idx(arr, (int)i);
-        out[i] = (long)json_object_get_int64(v);
+        if (strcmp(type, "past") == 0) {
+            struct json_object *id_obj = NULL;
+            if (v != NULL && json_object_is_type(v, json_type_object) &&
+                json_object_object_get_ex(v, "objectID", &id_obj)) {
+                out[i] = strtol(json_object_get_string(id_obj), NULL, 10);
+            } else {
+                out[i] = 0;
+            }
+        } else {
+            out[i] = (long)json_object_get_int64(v);
+        }
     }
-    json_object_put(arr);
+    json_object_put(root);
     *ids = out;
     *count = n;
     return 0;
