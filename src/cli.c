@@ -188,6 +188,14 @@ static char *build_source_text(const HNItem *post) {
     return source;
 }
 
+static int cli_print_stream_chunk(const char *chunk, void *user_data) {
+    FILE *out = (FILE *)user_data;
+    if (fputs(chunk, out) == EOF) {
+        return 0;
+    }
+    return fflush(out) == 0;
+}
+
 int cli_run_open(long id) {
     HNItem post;
     char *err = NULL;
@@ -207,8 +215,11 @@ int cli_run_open(long id) {
 
     char *merged = text_join_two(source ? source : "", comments ? comments : "", "\nComments:\n");
     char *zh = NULL;
-    if (deepseek_summarize_translate_zh(merged ? merged : "", &zh, &err) == 0) {
-        printf("中文总结与翻译:\n%s\n", zh);
+    printf("中文总结与翻译:\n");
+    if (deepseek_summarize_translate_zh_stream(merged ? merged : "", cli_print_stream_chunk, stdout, &zh, &err) == 0) {
+        if (zh == NULL || zh[0] == '\0' || zh[strlen(zh) - 1] != '\n') {
+            putchar('\n');
+        }
         free(zh);
     } else {
         char *raw = text_truncate_copy(merged ? merged : "", 400);

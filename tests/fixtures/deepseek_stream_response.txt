@@ -1,0 +1,5 @@
+data: {"choices":[{"delta":{"content":"中文摘要: 这是一个 Tiny CLI 项目。\\n"}}]}
+
+data: {"choices":[{"delta":{"content":"中文翻译要点: 作者分享了一个简洁的命令行工具。"}}]}
+
+data: [DONE]

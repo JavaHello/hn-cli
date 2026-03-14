@@ -49,7 +49,7 @@ export DEEPSEEK_BASE_URL="https://api.deepseek.com"
 export HN_CLI_CACHE_FILE="/path/to/cache.json"
 ```
 
-打开帖子时会自动请求 DeepSeek `chat/completions`，输出中文总结与翻译。
+打开帖子时会自动请求 DeepSeek 流式 `chat/completions`，并在终端中边接收边输出中文总结与翻译。
 列表总结按帖子 ID 缓存，缓存有效期 24 小时，过期后自动刷新。
 
 ## 测试

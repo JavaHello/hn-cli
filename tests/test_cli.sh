@@ -41,6 +41,9 @@ out_open="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" ./hn-cli open 1001)"
 grep -q "中文总结与翻译:" <<<"$out_open" || { echo "FAIL: open missing chinese header"; echo "$out_open"; exit 1; }
 grep -q "中文摘要: 这是一个 Tiny CLI 项目。" <<<"$out_open" || { echo "FAIL: open missing chinese summary"; echo "$out_open"; exit 1; }
 
+out_open_stream="$(DEEPSEEK_MOCK_FILE="$ROOT_DIR/tests/fixtures/deepseek_stream_response.txt" HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" ./hn-cli open 1001)"
+grep -q "中文翻译要点: 作者分享了一个简洁的命令行工具。" <<<"$out_open_stream" || { echo "FAIL: open stream mock missing chinese translation"; echo "$out_open_stream"; exit 1; }
+
 out_open_index="$(HN_CLI_MOCK_DIR="$ROOT_DIR/tests/fixtures" ./hn-cli open 1)"
 grep -q "中文总结与翻译:" <<<"$out_open_index" || { echo "FAIL: open index missing chinese header"; echo "$out_open_index"; exit 1; }
 
