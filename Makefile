@@ -3,7 +3,7 @@ CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -O2 -Iinclude 
 LDFLAGS = $(shell pkg-config --libs json-c) -lcurl
 
 TARGET = hn-cli
-SOURCES = src/main.c src/cli.c src/http.c src/hn_api.c src/deepseek.c src/text.c
+SOURCES = src/main.c src/cli.c src/http.c src/hn_api.c src/deepseek.c src/text.c src/cache.c
 OBJECTS = $(SOURCES:.c=.o)
 
 all: $(TARGET)

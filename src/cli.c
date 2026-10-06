@@ -1,224 +1,217 @@
 #include "cli.h"
+#include "cache.h"
 #include "deepseek.h"
 #include "hn_api.h"
 #include "text.h"
 
-#include <json-c/json.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
-#define SUMMARY_TTL_SECONDS 86400
+#define MAX_COMMENTS 20
 
-static const char *cache_file_path(void) {
-    const char *p = getenv("HN_CLI_CACHE_FILE");
-    if (p != NULL && p[0] != '\0') {
-        return p;
+static const char *type_label(const char *type) {
+    if (type == NULL || strcmp(type, "top") == 0) {
+        return "头条";
     }
-    return ".hn_cli_cache.json";
+    if (strcmp(type, "past") == 0) {
+        return "最新";
+    }
+    if (strcmp(type, "ask") == 0) {
+        return "Ask HN";
+    }
+    if (strcmp(type, "show") == 0) {
+        return "Show HN";
+    }
+    return type;
 }
 
-static struct json_object *cache_load(void) {
-    const char *path = cache_file_path();
-    FILE *f = fopen(path, "rb");
-    if (f == NULL) {
-        return json_object_new_object();
-    }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return json_object_new_object();
-    }
-    long sz = ftell(f);
-    if (sz <= 0) {
-        fclose(f);
-        return json_object_new_object();
-    }
-    rewind(f);
-    char *buf = malloc((size_t)sz + 1);
-    if (buf == NULL) {
-        fclose(f);
-        return json_object_new_object();
-    }
-    size_t n = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[n] = '\0';
-    struct json_object *obj = json_tokener_parse(buf);
-    free(buf);
-    if (obj == NULL || !json_object_is_type(obj, json_type_object)) {
-        if (obj != NULL) {
-            json_object_put(obj);
-        }
-        return json_object_new_object();
-    }
-    return obj;
+static int fetch_page(const char *type, size_t page, size_t page_size, long **ids, size_t *count, char **error_msg) {
+    size_t offset = (page - 1) * page_size;
+    return hn_fetch_story_ids(type, offset, page_size, ids, count, error_msg);
 }
 
-static void cache_save(struct json_object *cache) {
-    const char *path = cache_file_path();
-    FILE *f = fopen(path, "wb");
-    if (f == NULL) {
-        return;
-    }
-    const char *text = json_object_to_json_string_ext(cache, JSON_C_TO_STRING_PRETTY);
-    fwrite(text, 1, strlen(text), f);
-    fclose(f);
-}
-
-static int cache_get_summary(struct json_object *cache, long id, char **summary_out) {
-    *summary_out = NULL;
-    char key[32];
-    snprintf(key, sizeof(key), "%ld", id);
-    struct json_object *entry = NULL;
-    if (!json_object_object_get_ex(cache, key, &entry) || !json_object_is_type(entry, json_type_object)) {
-        return 0;
-    }
-    struct json_object *summary = NULL;
-    struct json_object *updated = NULL;
-    if (!json_object_object_get_ex(entry, "summary_zh", &summary) ||
-        !json_object_object_get_ex(entry, "updated_at", &updated)) {
-        return 0;
-    }
-    time_t now = time(NULL);
-    long ts = json_object_get_int64(updated);
-    if ((long)now - ts > SUMMARY_TTL_SECONDS) {
-        return 0;
-    }
-    const char *s = json_object_get_string(summary);
-    if (s == NULL || s[0] == '\0') {
-        return 0;
-    }
-    *summary_out = strdup(s);
-    return *summary_out ? 1 : 0;
-}
-
-static int cache_set_summary(struct json_object *cache, long id, const char *summary) {
-    char key[32];
-    snprintf(key, sizeof(key), "%ld", id);
-    struct json_object *entry = json_object_new_object();
-    if (entry == NULL) {
-        return -1;
-    }
-    json_object_object_add(entry, "summary_zh", json_object_new_string(summary ? summary : ""));
-    json_object_object_add(entry, "updated_at", json_object_new_int64((int64_t)time(NULL)));
-    json_object_object_add(cache, key, entry);
-    return 0;
-}
-
-static char *build_list_summary_source(const HNItem *item) {
-    char id_part[64];
-    snprintf(id_part, sizeof(id_part), "id:%ld", item->id);
-    char *title = text_join_two("标题: ", item->title ? item->title : "", "");
-    char *body_clean = text_strip_html(item->text ? item->text : "");
-    char *body = text_join_two("正文: ", body_clean ? body_clean : "", "");
-    char *head = text_join_two(id_part, title ? title : "", "\n");
-    char *merged = text_join_two(head ? head : "", body ? body : "", "\n");
-    free(title);
-    free(body_clean);
-    free(body);
-    free(head);
-    return merged;
-}
-
-static int print_list_with_ids(const long *ids, size_t count) {
-    struct json_object *cache = cache_load();
-    int dirty = 0;
-    for (size_t i = 0; i < count; i++) {
-        HNItem item;
-        char *err = NULL;
-        if (hn_fetch_item(ids[i], &item, &err) != 0) {
-            fprintf(stderr, "warn: fetch item %ld failed: %s\n", ids[i], err ? err : "unknown");
-            free(err);
-            continue;
-        }
-        const char *title = item.title ? item.title : "(no title)";
-        printf("[%zu] [%d] %s (id:%ld)\n", i + 1, item.score, title, item.id);
-
-        char *summary = NULL;
-        if (!cache_get_summary(cache, item.id, &summary)) {
-            char *source = build_list_summary_source(&item);
-            if (deepseek_summarize_one_line_zh(source ? source : title, &summary, &err) != 0) {
-                free(err);
-                summary = strdup("（生成失败）");
-            } else {
-                if (cache_set_summary(cache, item.id, summary) == 0) {
-                    dirty = 1;
-                }
-            }
-            free(source);
-        }
-        printf("总结: %s\n", summary ? summary : "（生成失败）");
-        free(summary);
-        hn_item_free(&item);
-    }
-    if (dirty) {
-        cache_save(cache);
-    }
-    json_object_put(cache);
-    return 0;
-}
-
-int cli_run_list(const char *type, size_t limit) {
-    long *ids = NULL;
-    size_t count = 0;
-    char *err = NULL;
-    if (hn_fetch_story_ids(type, limit, &ids, &count, &err) != 0) {
-        fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
-        free(err);
-        return 1;
-    }
-    int rc = print_list_with_ids(ids, count);
-    free(ids);
-    return rc;
-}
-
-static char *build_source_text(const HNItem *post) {
+/* 拼给模型看的帖子正文。 */
+static char *build_source_text(const HNItem *item) {
     char id_line[64];
-    snprintf(id_line, sizeof(id_line), "Post ID: %ld", post->id);
-    char *title = text_join_two("Title: ", post->title ? post->title : "", "");
-    char *body_clean = text_strip_html(post->text ? post->text : "");
+    snprintf(id_line, sizeof(id_line), "Post ID: %ld", item->id);
+    char *body_clean = text_strip_html(item->text ? item->text : "");
+    char *head = text_join_two(id_line, item->title ? item->title : "", "\nTitle: ");
     char *body = text_join_two("Body: ", body_clean ? body_clean : "", "");
-    char *head = text_join_two(id_line, title ? title : "", "\n");
     char *source = text_join_two(head ? head : "", body ? body : "", "\n");
-    free(title);
     free(body_clean);
     free(body);
     free(head);
     return source;
 }
 
-static int cli_print_stream_chunk(const char *chunk, void *user_data) {
-    FILE *out = (FILE *)user_data;
-    if (fputs(chunk, out) == EOF) {
+/* 打印一页的条目，base_index 是本页第一条的全局序号（从 0 开始）。返回成功打印的条数。 */
+static size_t print_items(const long *ids, size_t count, size_t base_index) {
+    if (count == 0) {
         return 0;
     }
-    return fflush(out) == 0;
+    HNItem *items = calloc(count, sizeof(HNItem));
+    int *ok = calloc(count, sizeof(int));
+    if (items == NULL || ok == NULL) {
+        fprintf(stderr, "error: oom\n");
+        free(items);
+        free(ok);
+        return 0;
+    }
+
+    hn_fetch_items(ids, count, items, ok);
+
+    Cache *cache = cache_open();
+    size_t printed = 0;
+    size_t since_flush = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!ok[i]) {
+            fprintf(stderr, "warn: fetch item %ld failed\n", ids[i]);
+            continue;
+        }
+        printed++;
+        printf("[%zu] [%d] %s (id:%ld)\n", base_index + i + 1, items[i].score,
+               items[i].title ? items[i].title : "(no title)", items[i].id);
+
+        char *summary = NULL;
+        if (!cache_get_summary(cache, items[i].id, &summary)) {
+            char *source = build_source_text(&items[i]);
+            char *err = NULL;
+            if (deepseek_summarize_one_line_zh(source ? source : "", &summary, &err) != 0) {
+                free(err);
+                summary = strdup("（生成失败）");
+            } else {
+                cache_set_summary(cache, items[i].id, summary);
+            }
+            free(source);
+        }
+        printf("总结: %s\n", summary ? summary : "（生成失败）");
+        free(summary);
+
+        /* 长列表跑到一半被 Ctrl-C 时，已经生成的内容不至于全丢。 */
+        if (++since_flush >= 5) {
+            cache_flush(cache);
+            since_flush = 0;
+        }
+    }
+    cache_close(cache);
+
+    for (size_t i = 0; i < count; i++) {
+        hn_item_free(&items[i]);
+    }
+    free(items);
+    free(ok);
+    return printed;
+}
+
+int cli_run_list(const char *type, size_t page, size_t page_size) {
+    long *ids = NULL;
+    size_t count = 0;
+    char *err = NULL;
+    if (fetch_page(type, page, page_size, &ids, &count, &err) != 0) {
+        fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
+        free(err);
+        return 1;
+    }
+
+    printf("=== %s 第 %zu 页 ===\n", type_label(type), page);
+    if (count == 0) {
+        printf("没有更多了。\n");
+        free(ids);
+        return 0;
+    }
+
+    size_t printed = print_items(ids, count, (page - 1) * page_size);
+    if (printed == 0) {
+        fprintf(stderr, "error: 这一页的帖子全部获取失败（网络或 API 异常）\n");
+        free(ids);
+        return 1;
+    }
+    if (page > 1) {
+        printf("上一页: -p %zu\n", page - 1);
+    }
+    if (count == page_size) {
+        printf("下一页: -p %zu\n", page + 1);
+    }
+    free(ids);
+    return 0;
+}
+
+typedef struct {
+    FILE *out;
+    char *buf;
+    size_t len;
+} StreamSink;
+
+static int stream_sink_write(const char *chunk, void *user_data) {
+    StreamSink *sink = (StreamSink *)user_data;
+    if (fputs(chunk, sink->out) == EOF || fflush(sink->out) != 0) {
+        return 0;
+    }
+    size_t n = strlen(chunk);
+    char *p = realloc(sink->buf, sink->len + n + 1);
+    if (p == NULL) {
+        return 0;
+    }
+    sink->buf = p;
+    memcpy(sink->buf + sink->len, chunk, n);
+    sink->len += n;
+    sink->buf[sink->len] = '\0';
+    return 1;
+}
+
+static void print_cached_detail(const char *detail) {
+    printf("中文总结与翻译: [本地缓存]\n%s", detail);
+    size_t n = strlen(detail);
+    if (n == 0 || detail[n - 1] != '\n') {
+        putchar('\n');
+    }
 }
 
 int cli_run_open(long id) {
+    return cli_run_open_ex(id, 0);
+}
+
+int cli_run_open_ex(long id, int refresh) {
+    Cache *cache = cache_open();
+    char *cached = NULL;
+    if (!refresh && cache_get_detail(cache, id, &cached)) {
+        print_cached_detail(cached);
+        free(cached);
+        cache_close(cache);
+        return 0;
+    }
+
     HNItem post;
     char *err = NULL;
     if (hn_fetch_item(id, &post, &err) != 0) {
         fprintf(stderr, "error: fetch post failed: %s\n", err ? err : "unknown");
         free(err);
+        cache_close(cache);
         return 1;
     }
 
     char *source = build_source_text(&post);
     char *comments = NULL;
-    if (hn_collect_comment_texts(post.kids, post.kids_count, 20, &comments, &err) != 0) {
+    if (hn_collect_comment_texts(post.kids, post.kids_count, MAX_COMMENTS, &comments, &err) != 0) {
         fprintf(stderr, "warn: comment fetch failed: %s\n", err ? err : "unknown");
         free(err);
         comments = strdup("");
     }
 
     char *merged = text_join_two(source ? source : "", comments ? comments : "", "\nComments:\n");
+    StreamSink sink = {.out = stdout};
     char *zh = NULL;
     printf("中文总结与翻译:\n");
-    if (deepseek_summarize_translate_zh_stream(merged ? merged : "", cli_print_stream_chunk, stdout, &zh, &err) == 0) {
-        if (zh == NULL || zh[0] == '\0' || zh[strlen(zh) - 1] != '\n') {
+
+    int rc = 0;
+    if (deepseek_summarize_translate_zh_stream(merged ? merged : "", stream_sink_write, &sink, &zh, &err) == 0) {
+        if (sink.len == 0 || sink.buf[sink.len - 1] != '\n') {
             putchar('\n');
+        }
+        /* 只在完整拿到结果后才落缓存，避免存下被中断的半截内容。 */
+        if (sink.len > 0) {
+            cache_set_detail(cache, id, sink.buf);
         }
         free(zh);
     } else {
@@ -227,16 +220,19 @@ int cli_run_open(long id) {
         printf("原文片段:\n%s\n", raw ? raw : "");
         free(raw);
         free(err);
+        rc = 1;
     }
 
+    free(sink.buf);
     free(source);
     free(comments);
     free(merged);
     hn_item_free(&post);
-    return 0;
+    cache_close(cache);
+    return rc;
 }
 
-int cli_run_open_index(size_t index, size_t limit) {
+int cli_run_open_index(const char *type, size_t index) {
     if (index == 0) {
         fprintf(stderr, "error: invalid index\n");
         return 1;
@@ -245,52 +241,129 @@ int cli_run_open_index(size_t index, size_t limit) {
     long *ids = NULL;
     size_t count = 0;
     char *err = NULL;
-    if (hn_fetch_top_ids(limit, &ids, &count, &err) != 0) {
+    if (hn_fetch_story_ids(type, index - 1, 1, &ids, &count, &err) != 0) {
         fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
         free(err);
         return 1;
     }
-    if (index > count) {
-        fprintf(stderr, "error: index out of range (max %zu)\n", count);
+    if (count == 0) {
+        fprintf(stderr, "error: index out of range\n");
         free(ids);
         return 1;
     }
-    long id = ids[index - 1];
+    long id = ids[0];
     free(ids);
     return cli_run_open(id);
 }
 
-int cli_run_interactive(size_t limit) {
+static void print_page(const char *type, size_t page, size_t page_size, const long *ids, size_t count) {
+    printf("\n=== %s 第 %zu 页 ===\n", type_label(type), page);
+    print_items(ids, count, (page - 1) * page_size);
+}
+
+int cli_run_interactive(const char *type, size_t page_size) {
+    size_t page = 1;
     long *ids = NULL;
     size_t count = 0;
-    char *err = NULL;
-    if (hn_fetch_top_ids(limit, &ids, &count, &err) != 0) {
-        fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
-        free(err);
-        return 1;
-    }
+    int need_fetch = 1;
+    long last_opened = 0;
 
-    print_list_with_ids(ids, count);
-    printf("\n输入序号打开帖子 (q 退出): ");
-    fflush(stdout);
+    for (;;) {
+        if (need_fetch) {
+            free(ids);
+            ids = NULL;
+            count = 0;
+            char *err = NULL;
+            if (fetch_page(type, page, page_size, &ids, &count, &err) != 0) {
+                fprintf(stderr, "error: list fetch failed: %s\n", err ? err : "unknown");
+                free(err);
+                return 1;
+            }
+            need_fetch = 0;
+        }
 
-    char line[64];
-    if (fgets(line, sizeof(line), stdin) == NULL) {
-        free(ids);
-        return 0;
-    }
-    if (line[0] == 'q' || line[0] == 'Q') {
-        free(ids);
-        return 0;
-    }
-    long idx = strtol(line, NULL, 10);
-    if (idx < 1 || (size_t)idx > count) {
-        fprintf(stderr, "error: invalid index\n");
-        free(ids);
-        return 1;
-    }
+        if (count == 0) {
+            printf("\n=== %s 第 %zu 页 ===\n没有更多了。\n", type_label(type), page);
+            if (page > 1) {
+                page--;
+                need_fetch = 1;
+                continue;
+            }
+            free(ids);
+            return 0;
+        }
 
-    long id = ids[idx - 1];
-    free(ids);
-    return cli_run_open(id);
+        print_page(type, page, page_size, ids, count);
+        printf("\n[序号]打开帖子  [n]下一页  [p]上一页  [r]重看上一个（忽略缓存）  [q]退出\n> ");
+        fflush(stdout);
+
+        char line[256];
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            putchar('\n');
+            free(ids);
+            return 0;
+        }
+        /* 超长输入会残留在 stdin 里被当成下一条命令，这里主动丢弃。 */
+        if (strchr(line, '\n') == NULL && !feof(stdin)) {
+            int ch;
+            while ((ch = getchar()) != '\n' && ch != EOF) {
+            }
+        }
+
+        char *p = line;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (*p == '\n' || *p == '\0') {
+            continue;
+        }
+        if (*p == 'q' || *p == 'Q') {
+            free(ids);
+            return 0;
+        }
+        if (*p == 'n' || *p == 'N') {
+            page++;
+            need_fetch = 1;
+            continue;
+        }
+        if (*p == 'p' || *p == 'P') {
+            if (page > 1) {
+                page--;
+                need_fetch = 1;
+            } else {
+                printf("已经是第一页。\n");
+            }
+            continue;
+        }
+        if (*p == 'r' || *p == 'R') {
+            if (last_opened == 0) {
+                printf("还没有打开过帖子。\n");
+                continue;
+            }
+            printf("\n--- 重新获取 id:%ld（忽略缓存）---\n", last_opened);
+            cli_run_open_ex(last_opened, 1);
+            continue;
+        }
+
+        char *end = NULL;
+        long idx = strtol(p, &end, 10);
+        if (end == p) {
+            printf("无法识别的输入。\n");
+            continue;
+        }
+
+        size_t base = (page - 1) * page_size;
+        size_t local = 0;
+        if (idx >= (long)base + 1 && idx <= (long)(base + count)) {
+            local = (size_t)idx - base;
+        } else if (idx >= 1 && (size_t)idx <= count) {
+            local = (size_t)idx;
+        } else {
+            printf("序号超出范围。\n");
+            continue;
+        }
+        last_opened = ids[local - 1];
+        printf("\n--- 打开 [%zu] (id:%ld) ---\n", base + local, last_opened);
+        cli_run_open(last_opened);
+    }
 }

@@ -9,6 +9,14 @@
 
 #define HN_BASE "https://hacker-news.firebaseio.com/v0"
 #define HN_ALGOLIA_PAST_URL "https://hn.algolia.com/api/v1/search_by_date?tags=story"
+/* Algolia 该端点最多返回 1000 条，hitsPerPage 也有 1000 的上限。 */
+#define HN_ALGOLIA_MAX_HITS 1000
+#define MAX_PARALLEL_FETCH 8
+
+static int mock_mode(void) {
+    const char *mock_dir = getenv("HN_CLI_MOCK_DIR");
+    return mock_dir != NULL && mock_dir[0] != '\0';
+}
 
 static char *read_mock_file(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -91,20 +99,91 @@ static int resolve_story_endpoint(const char *type, const char **endpoint, const
     return -1;
 }
 
-int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count, char **error_msg) {
+static char *dup_json_string(struct json_object *obj, const char *key) {
+    struct json_object *v = NULL;
+    if (!json_object_object_get_ex(obj, key, &v)) {
+        return NULL;
+    }
+    const char *s = json_object_get_string(v);
+    return s != NULL ? strdup(s) : NULL;
+}
+
+static int parse_item_json(struct json_object *obj, long fallback_id, HNItem *item) {
+    memset(item, 0, sizeof(*item));
+    if (obj == NULL || !json_object_is_type(obj, json_type_object)) {
+        return -1;
+    }
+
+    struct json_object *v = NULL;
+    item->id = json_object_object_get_ex(obj, "id", &v) ? (long)json_object_get_int64(v) : fallback_id;
+    item->title = dup_json_string(obj, "title");
+    item->by = dup_json_string(obj, "by");
+    item->text = dup_json_string(obj, "text");
+    if (json_object_object_get_ex(obj, "score", &v)) {
+        item->score = json_object_get_int(v);
+    }
+    if (json_object_object_get_ex(obj, "dead", &v)) {
+        item->dead = json_object_get_boolean(v);
+    }
+    if (json_object_object_get_ex(obj, "deleted", &v)) {
+        item->deleted = json_object_get_boolean(v);
+    }
+
+    if (json_object_object_get_ex(obj, "kids", &v) && json_object_is_type(v, json_type_array)) {
+        size_t n = (size_t)json_object_array_length(v);
+        if (n > 0) {
+            item->kids = malloc(n * sizeof(long));
+            if (item->kids == NULL) {
+                hn_item_free(item);
+                return -1;
+            }
+            item->kids_count = n;
+            for (size_t i = 0; i < n; i++) {
+                struct json_object *kid = json_object_array_get_idx(v, (int)i);
+                item->kids[i] = kid != NULL ? (long)json_object_get_int64(kid) : 0;
+            }
+        }
+    }
+    return 0;
+}
+
+int hn_fetch_story_ids(const char *type, size_t offset, size_t limit, long **ids, size_t *count, char **error_msg) {
+    *ids = NULL;
+    *count = 0;
+
     const char *endpoint = NULL;
     const char *mock_name = NULL;
     if (resolve_story_endpoint(type, &endpoint, &mock_name) != 0) {
         *error_msg = strdup("invalid story type");
         return -1;
     }
+    if (limit == 0) {
+        return 0;
+    }
 
-    char url[256];
-    if (strcmp(type, "past") == 0) {
-        snprintf(url, sizeof(url), "%s", endpoint);
+    int is_past = strcmp(type, "past") == 0;
+    /* Algolia 只允许翻到前 1000 条，超出时它会返回空 hits，必须和「真的没有了」区分开。 */
+    if (is_past && !mock_mode() && offset >= HN_ALGOLIA_MAX_HITS) {
+        *error_msg = strdup("past 列表最多只能翻到前 1000 条");
+        return -1;
+    }
+    char url[512];
+    /* local_offset 是「相对于服务端返回的这一页」还要跳过多少条。 */
+    size_t local_offset = offset;
+
+    if (is_past) {
+        if (mock_mode()) {
+            snprintf(url, sizeof(url), "%s", endpoint);
+        } else {
+            size_t page_size = limit > HN_ALGOLIA_MAX_HITS ? HN_ALGOLIA_MAX_HITS : limit;
+            size_t page = offset / page_size;
+            local_offset = offset % page_size;
+            snprintf(url, sizeof(url), "%s&page=%zu&hitsPerPage=%zu", endpoint, page, page_size);
+        }
     } else {
         snprintf(url, sizeof(url), HN_BASE "/%s", endpoint);
     }
+
     char *payload = fetch_url_or_mock(url, mock_name, error_msg);
     if (payload == NULL) {
         return -1;
@@ -118,7 +197,7 @@ int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count
     }
 
     struct json_object *arr = NULL;
-    if (strcmp(type, "past") == 0) {
+    if (is_past) {
         if (!json_object_is_type(root, json_type_object) ||
             !json_object_object_get_ex(root, "hits", &arr) ||
             !json_object_is_type(arr, json_type_array)) {
@@ -136,36 +215,43 @@ int hn_fetch_story_ids(const char *type, size_t limit, long **ids, size_t *count
     }
 
     size_t total = (size_t)json_object_array_length(arr);
-    size_t n = total < limit ? total : limit;
-    long *out = calloc(n, sizeof(long));
+    if (local_offset >= total) {
+        json_object_put(root);
+        return 0;
+    }
+    size_t available = total - local_offset;
+    size_t n = available < limit ? available : limit;
+    if (n == 0) {
+        json_object_put(root);
+        return 0;
+    }
+
+    long *out = malloc(n * sizeof(long));
     if (out == NULL) {
-        json_object_put(arr);
+        json_object_put(root);
         *error_msg = strdup("oom");
         return -1;
     }
 
     for (size_t i = 0; i < n; i++) {
-        struct json_object *v = json_object_array_get_idx(arr, (int)i);
-        if (strcmp(type, "past") == 0) {
+        struct json_object *v = json_object_array_get_idx(arr, (int)(local_offset + i));
+        if (is_past) {
             struct json_object *id_obj = NULL;
+            const char *s = NULL;
             if (v != NULL && json_object_is_type(v, json_type_object) &&
                 json_object_object_get_ex(v, "objectID", &id_obj)) {
-                out[i] = strtol(json_object_get_string(id_obj), NULL, 10);
-            } else {
-                out[i] = 0;
+                s = json_object_get_string(id_obj);
             }
+            out[i] = s != NULL ? strtol(s, NULL, 10) : 0;
         } else {
-            out[i] = (long)json_object_get_int64(v);
+            out[i] = v != NULL ? (long)json_object_get_int64(v) : 0;
         }
     }
     json_object_put(root);
+
     *ids = out;
     *count = n;
     return 0;
-}
-
-int hn_fetch_top_ids(size_t limit, long **ids, size_t *count, char **error_msg) {
-    return hn_fetch_story_ids("top", limit, ids, count, error_msg);
 }
 
 int hn_fetch_item(long id, HNItem *item, char **error_msg) {
@@ -182,59 +268,81 @@ int hn_fetch_item(long id, HNItem *item, char **error_msg) {
 
     struct json_object *obj = json_tokener_parse(payload);
     free(payload);
-    if (obj == NULL || !json_object_is_type(obj, json_type_object)) {
+    if (parse_item_json(obj, id, item) != 0) {
         *error_msg = strdup("invalid item json");
-        if (obj) {
+        if (obj != NULL) {
             json_object_put(obj);
         }
         return -1;
     }
+    json_object_put(obj);
+    return 0;
+}
 
-    struct json_object *v = NULL;
-    if (json_object_object_get_ex(obj, "id", &v)) {
-        item->id = (long)json_object_get_int64(v);
-    } else {
-        item->id = id;
+size_t hn_fetch_items(const long *ids, size_t count, HNItem *items, int *ok) {
+    for (size_t i = 0; i < count; i++) {
+        memset(&items[i], 0, sizeof(HNItem));
+        ok[i] = 0;
     }
-    if (json_object_object_get_ex(obj, "title", &v)) {
-        item->title = strdup(json_object_get_string(v));
-    }
-    if (json_object_object_get_ex(obj, "by", &v)) {
-        item->by = strdup(json_object_get_string(v));
-    }
-    if (json_object_object_get_ex(obj, "score", &v)) {
-        item->score = json_object_get_int(v);
-    }
-    if (json_object_object_get_ex(obj, "text", &v)) {
-        item->text = strdup(json_object_get_string(v));
-    }
-    if (json_object_object_get_ex(obj, "dead", &v)) {
-        item->dead = json_object_get_boolean(v);
-    }
-    if (json_object_object_get_ex(obj, "deleted", &v)) {
-        item->deleted = json_object_get_boolean(v);
+    if (count == 0) {
+        return 0;
     }
 
-    if (json_object_object_get_ex(obj, "kids", &v) && json_object_is_type(v, json_type_array)) {
-        size_t n = (size_t)json_object_array_length(v);
-        if (n > 0) {
-            item->kids = calloc(n, sizeof(long));
-            if (item->kids == NULL) {
-                json_object_put(obj);
-                *error_msg = strdup("oom");
-                hn_item_free(item);
-                return -1;
+    /* mock 模式读的是本地文件，顺序处理即可。 */
+    if (mock_mode()) {
+        size_t good = 0;
+        for (size_t i = 0; i < count; i++) {
+            char *err = NULL;
+            if (hn_fetch_item(ids[i], &items[i], &err) == 0) {
+                ok[i] = 1;
+                good++;
             }
-            item->kids_count = n;
-            for (size_t i = 0; i < n; i++) {
-                struct json_object *kid = json_object_array_get_idx(v, (int)i);
-                item->kids[i] = (long)json_object_get_int64(kid);
+            free(err);
+        }
+        return good;
+    }
+
+    enum { URL_CAP = 128 };
+    char **urls = calloc(count, sizeof(char *));
+    HttpResult *results = calloc(count, sizeof(HttpResult));
+    if (urls == NULL || results == NULL) {
+        free(urls);
+        free(results);
+        return 0;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        urls[i] = malloc(URL_CAP);
+        if (urls[i] != NULL) {
+            snprintf(urls[i], URL_CAP, HN_BASE "/item/%ld.json", ids[i]);
+        }
+        /* malloc 失败也不中止：http_get_many 会把这一条标记为失败，其余照常抓取。 */
+    }
+
+    size_t good = 0;
+    if (http_get_many((const char *const *)urls, count, results, MAX_PARALLEL_FETCH) == 0) {
+        for (size_t i = 0; i < count; i++) {
+            if (results[i].body == NULL) {
+                continue;
+            }
+            struct json_object *obj = json_tokener_parse(results[i].body);
+            if (parse_item_json(obj, ids[i], &items[i]) == 0) {
+                ok[i] = 1;
+                good++;
+            }
+            if (obj != NULL) {
+                json_object_put(obj);
             }
         }
     }
 
-    json_object_put(obj);
-    return 0;
+    for (size_t i = 0; i < count; i++) {
+        free(urls[i]);
+        http_result_free(&results[i]);
+    }
+    free(urls);
+    free(results);
+    return good;
 }
 
 static int append_text(char **dst, const char *chunk) {
@@ -260,30 +368,63 @@ static int append_text(char **dst, const char *chunk) {
 int hn_collect_comment_texts(const long *kids, size_t kids_count, size_t max_comments, char **combined_text, char **error_msg) {
     (void)error_msg;
     *combined_text = NULL;
-    size_t taken = 0;
-
-    for (size_t i = 0; i < kids_count && taken < max_comments; i++) {
-        HNItem comment;
-        char *err = NULL;
-        if (hn_fetch_item(kids[i], &comment, &err) != 0) {
-            free(err);
-            continue;
-        }
-
-        if (!comment.dead && !comment.deleted && comment.text != NULL) {
-            char *clean = text_strip_html(comment.text);
-            if (clean != NULL && clean[0] != '\0') {
-                if (append_text(combined_text, clean) != 0) {
-                    free(clean);
-                    hn_item_free(&comment);
-                    return -1;
-                }
-                taken++;
-            }
-            free(clean);
-        }
-        hn_item_free(&comment);
+    if (max_comments == 0 || kids_count == 0) {
+        *combined_text = strdup("");
+        return *combined_text ? 0 : -1;
     }
+
+    HNItem *items = calloc(max_comments, sizeof(HNItem));
+    int *ok = calloc(max_comments, sizeof(int));
+    if (items == NULL || ok == NULL) {
+        free(items);
+        free(ok);
+        return -1;
+    }
+
+    size_t taken = 0;
+    size_t next = 0;
+    size_t scanned = 0;
+    /* 大量评论被删/被折叠时，限制最多扫多少条，避免一直发请求。 */
+    size_t scan_limit = max_comments * 5;
+
+    while (next < kids_count && taken < max_comments && scanned < scan_limit) {
+        size_t batch = max_comments - taken;
+        if (batch > kids_count - next) {
+            batch = kids_count - next;
+        }
+        if (batch > scan_limit - scanned) {
+            batch = scan_limit - scanned;
+        }
+
+        hn_fetch_items(kids + next, batch, items, ok);
+        for (size_t i = 0; i < batch; i++) {
+            if (ok[i] && !items[i].dead && !items[i].deleted && items[i].text != NULL) {
+                char *clean = text_strip_html(items[i].text);
+                if (clean != NULL && clean[0] != '\0') {
+                    if (append_text(combined_text, clean) != 0) {
+                        free(clean);
+                        for (size_t k = i; k < batch; k++) {
+                            hn_item_free(&items[k]);
+                        }
+                        free(items);
+                        free(ok);
+                        free(*combined_text);
+                        *combined_text = NULL;
+                        return -1;
+                    }
+                    taken++;
+                }
+                free(clean);
+            }
+            /* 必须逐条释放：下一批会复用 items 数组，hn_fetch_items 会 memset 掉这些指针。 */
+            hn_item_free(&items[i]);
+        }
+        next += batch;
+        scanned += batch;
+    }
+
+    free(items);
+    free(ok);
 
     if (*combined_text == NULL) {
         *combined_text = strdup("");

@@ -168,8 +168,10 @@ static int process_stream_event(const char *payload, DeepseekStreamState *state)
     int rc = append_deepseek_chunk_text(obj, state);
     json_object_put(obj);
     if (rc != 0) {
-        free(state->error_msg);
-        state->error_msg = strdup("oom");
+        /* 回调已经把真实原因写进 error_msg 时不要覆盖掉。 */
+        if (state->error_msg == NULL) {
+            state->error_msg = strdup("oom");
+        }
         return -1;
     }
     return 0;
@@ -343,7 +345,11 @@ static int deepseek_chat(const char *system_prompt, const char *user_prompt, dee
     struct json_object *sys = json_object_new_object();
     struct json_object *usr = json_object_new_object();
 
-    json_object_object_add(root, "model", json_object_new_string("deepseek-flash"));
+    const char *model = getenv("DEEPSEEK_MODEL");
+    if (model == NULL || model[0] == '\0') {
+        model = "deepseek-flash";
+    }
+    json_object_object_add(root, "model", json_object_new_string(model));
     json_object_object_add(sys, "role", json_object_new_string("system"));
     json_object_object_add(sys, "content", json_object_new_string(system_prompt));
     json_object_object_add(usr, "role", json_object_new_string("user"));
