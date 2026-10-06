@@ -343,7 +343,7 @@ static int deepseek_chat(const char *system_prompt, const char *user_prompt, dee
     struct json_object *sys = json_object_new_object();
     struct json_object *usr = json_object_new_object();
 
-    json_object_object_add(root, "model", json_object_new_string("deepseek-chat"));
+    json_object_object_add(root, "model", json_object_new_string("deepseek-flash"));
     json_object_object_add(sys, "role", json_object_new_string("system"));
     json_object_object_add(sys, "content", json_object_new_string(system_prompt));
     json_object_object_add(usr, "role", json_object_new_string("user"));
